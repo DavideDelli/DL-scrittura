@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual Environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+
+# Datasets
+dataset/
+dataset_normalizzato/
+dataset_segmentato/
+
+# Checkpoints e pesi del modello
+cvae_checkpoints_capacita_aumentata/
+cvae_checkpoints_modular/
+*.h5
+
+# OS
+.DS_Store
+Thumbs.db
