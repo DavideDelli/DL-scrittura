@@ -7,7 +7,9 @@ import json
 import random
 from PIL import Image, ImageOps, ImageEnhance
 
-# --- 1. CONFIGURAZIONE ---
+# ---------------------------------------------------------------------------
+# 1. CONFIGURAZIONE PERCORSI
+# ---------------------------------------------------------------------------
 CHECKPOINT_DIR     = "./cvae_checkpoints_v2"
 LABEL_INFO_PATH    = os.path.join(CHECKPOINT_DIR, "label_info.json")
 MODEL_WEIGHTS_PATH = os.path.join(CHECKPOINT_DIR, "cvae_final_weights_v2.weights.h5")
@@ -17,10 +19,14 @@ LATENT_DIM, EMBEDDING_DIM = 64, 32
 
 with open(LABEL_INFO_PATH, "r") as f:
     label_info = json.load(f)
-NUM_CLASSES = label_info["num_classes"]
-label_to_int_map = label_info["label_to_int"]
 
-# --- 2. ARCHITETTURA IDENTICA AL TRAINING ---
+NUM_CLASSES      = label_info["num_classes"]
+label_to_int_map = label_info["label_to_int"]
+print("Classi caricate:", list(label_to_int_map.keys()))
+
+# ---------------------------------------------------------------------------
+# 2. ARCHITETTURA ORIGINALE (Copiata esattamente dal tuo main_training.py)
+# ---------------------------------------------------------------------------
 
 def build_encoder(latent_dim_param, num_classes_param, embedding_dim_param):
     image_input = layers.Input(shape=(IMAGE_HEIGHT, IMAGE_WIDTH, 1), name="encoder_image_input")
@@ -38,6 +44,7 @@ def build_encoder(latent_dim_param, num_classes_param, embedding_dim_param):
     img_feat = layers.Dropout(0.3)(img_feat)
     merged   = layers.Concatenate()([img_feat, label_feat])
     merged   = layers.Dense(512, activation="relu")(merged)
+    merged   = layers.Dropout(0.2)(merged)
     z_mean    = layers.Dense(latent_dim_param, name="z_mean")(merged)
     z_log_var = layers.Dense(latent_dim_param, name="z_log_var")(merged)
     return Model([image_input, label_input], [z_mean, z_log_var], name="encoder")
@@ -82,83 +89,91 @@ class CVAE(Model):
         z = self.sampling([z_m, z_v])
         return self.decoder([z, lbl])
 
-# --- CARICAMENTO MODELLO COMPLETO ---
-print("Caricamento pesi...")
-encoder_model = build_encoder(LATENT_DIM, NUM_CLASSES, EMBEDDING_DIM)
-decoder_model = build_decoder(LATENT_DIM, NUM_CLASSES, EMBEDDING_DIM)
-full_cvae = CVAE(encoder_model, decoder_model)
-# Build necessario per caricare i pesi
-_ = full_cvae([np.zeros((1, 128, 128, 1)), np.zeros((1, 1))])
-full_cvae.load_weights(MODEL_WEIGHTS_PATH)
-print("Pesi caricati correttamente!")
+# --- INIZIALIZZAZIONE E CARICAMENTO ---
+enc = build_encoder(LATENT_DIM, NUM_CLASSES, EMBEDDING_DIM)
+dec = build_decoder(LATENT_DIM, NUM_CLASSES, EMBEDDING_DIM)
+cvae_model = CVAE(enc, dec)
+_ = cvae_model([np.zeros((1, 128, 128, 1)), np.zeros((1, 1))])
+cvae_model.load_weights(MODEL_WEIGHTS_PATH)
+print("Pesi caricati con successo!")
 
-# --- 3. RENDERING ---
+# ---------------------------------------------------------------------------
+# 3. LOGICA DI RENDERING
+# ---------------------------------------------------------------------------
 
-def normalizza_testo(testo):
-    """Gestisce accenti trasformandoli in lettere + apostrofo."""
-    cambi = {'à':"A'", 'è':"E'", 'é':"E'", 'ì':"I'", 'ò':"O'", 'ù':"U'", 'À':"A'", 'È':"E'", 'É':"E'", 'Ì':"I'", 'Ò':"O'", 'Ù':"U'"}
-    for a, n in cambi.items(): testo = testo.replace(a, n)
-    return testo.upper()
+def genera_char_img(char, temp=0.6):
+    mapping = {
+        '?': 'INTERROGATIVO', '!': 'ESCLAMATIVO', '.': 'PUNTO', 
+        ',': 'VIRGOLA', "'": 'VIRGOLA' # Se non hai 'APOSTROFO', usa VIRGOLA
+    }
+    # Prova a cercare APOSTROFO se presente, altrimenti segui il mapping
+    c_key = char.upper()
+    if char == "'":
+        c_key = 'APOSTROFO' if 'APOSTROFO' in label_to_int_map else 'VIRGOLA'
+    else:
+        c_key = mapping.get(char, c_key)
 
-def genera_char_img(c, temp=0.6):
-    mapping = {'?': 'INTERROGATIVO', '!': 'ESCLAMATIVO', '.': 'PUNTO', ',': 'VIRGOLA', "'": 'VIRGOLA'}
-    c_str = mapping.get(c, c)
-    if c_str not in label_to_int_map: return None
+    if c_key not in label_to_int_map:
+        return None
     
-    idx = label_to_int_map[c_str]
+    idx = label_to_int_map[c_key]
     z = tf.random.normal(shape=(1, LATENT_DIM)) * temp
-    # Generazione
-    gen = full_cvae.decoder.predict([z, np.array([[idx]])], verbose=0)[0, :, :, 0]
-    # Conversione 0-255 (Inversione per nero su bianco)
+    gen = cvae_model.decoder.predict([z, np.array([[idx]])], verbose=0)[0, :, :, 0]
     return (1.0 - gen) * 255
 
-def scrivi_testo_definitivo(testo, output="risultato_finale.png"):
-    testo = normalizza_testo(testo)
-    larghezza_pag = 2400
-    altezza_riga = 220
-    x_init, y_init = 80, 100
-    x, y = x_init, y_init
-    foglio = Image.new('L', (larghezza_pag, 2200), 255)
+def scrivi_testo_migliorato(testo, output="risultato_finale.png"):
+    # Gestione automatica accenti -> lettera + apostrofo
+    acc = {'à':"A'", 'è':"E'", 'é':"E'", 'ì':"I'", 'ò':"O'", 'ù':"U'", 'À':"A'", 'È':"E'", 'É':"E'", 'Ì':"I'", 'Ò':"O'", 'Ù':"U'"}
+    for k, v in acc.items(): testo = testo.replace(k, v)
     
+    foglio = Image.new('L', (2400, 1800), 255)
+    x, y = 80, 120
+    riga_h = 220
+    baseline_y = 150 # Altezza ideale dove appoggiano le lettere
+
     parole = testo.split(' ')
     for parola in parole:
-        immagini_p = []
-        larghezza_p = 0
-        
+        imgs = []
+        w_parola = 0
         for c in parola:
             raw = genera_char_img(c)
             if raw is not None:
-                # Trasformazione in PIL e pulizia
-                char_pil = Image.fromarray(raw.astype(np.uint8)).convert("L")
-                char_pil = ImageEnhance.Contrast(char_pil).enhance(2.5)
-                char_pil = char_pil.point(lambda p: 255 if p > 200 else p)
+                img_c = Image.fromarray(raw.astype(np.uint8)).convert("L")
+                img_c = ImageEnhance.Contrast(img_c).enhance(2.5)
+                # PULIZIA DRASTICA QUADRATINI
+                img_c = img_c.point(lambda p: 255 if p > 195 else p)
                 
-                # Ritaglio
-                inv = ImageOps.invert(char_pil)
+                inv = ImageOps.invert(img_c)
                 bbox = inv.getbbox()
                 if bbox:
-                    cropped = char_pil.crop(bbox)
-                    rot = cropped.rotate(random.uniform(-1.5, 1.5), resample=Image.BICUBIC, expand=True)
-                    immagini_p.append((rot, c))
-                    larghezza_p += rot.width + 5
+                    crop = img_c.crop(bbox)
+                    # Rimpicciolisci segni punteggiatura
+                    if c in ".,'":
+                        crop = crop.resize((int(crop.width*0.65), int(crop.height*0.65)), Image.LANCZOS)
+                    
+                    rot = crop.rotate(random.uniform(-1.8, 1.8), resample=Image.BICUBIC, expand=True)
+                    imgs.append((rot, c))
+                    w_parola += rot.width + 5
         
-        if x + larghezza_p > larghezza_pag - 100:
-            x, y = x_init, y + altezza_riga
+        if x + w_parola > 2300:
+            x, y = 80, y + riga_h
+        
+        for img_l, char_orig in imgs:
+            # POSIZIONAMENTO VERTICALE DINAMICO
+            if char_orig in ".,":
+                pos_y = y + baseline_y - img_l.height # Attaccato alla base
+            elif char_orig == "'":
+                pos_y = y + 15 # In alto
+            else:
+                pos_y = y + (baseline_y - 120) # Lettere normali un po' più in alto della base
             
-        for img_c, char_orig in immagini_p:
-            # Baseline corretta: sposta giù i simboli piccoli
-            off_y = 0
-            if char_orig in ".,'": off_y = 100 # Sposta il punto a terra
-            elif img_c.height < 60: off_y = 80  # Sposta giù le virgole/accenti
-            
-            mask = ImageOps.invert(img_c).point(lambda p: p if p > 40 else 0)
-            foglio.paste(img_c, (x, y + off_y + random.randint(-2,2)), mask=mask)
-            x += img_c.width + 5
-        x += 80 # Spazio tra parole
+            mask = ImageOps.invert(img_l).point(lambda p: 255 if p > 60 else 0)
+            foglio.paste(img_l, (x, pos_y + random.randint(-2, 2)), mask=mask)
+            x += img_l.width + 5
+        x += 80
 
     foglio.save(output)
     print(f"Creato: {output}")
 
-# --- TEST ---
-frase = "Ciao Davide! L'università è fantastica quando i progetti funzionano."
-scrivi_testo_definitivo(frase)
+# --- ESECUZIONE ---
+scrivi_testo_migliorato("Ciao Davide! L'università è fantastica, specialmente quando i progetti funzionano.")

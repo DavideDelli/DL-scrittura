@@ -24,3 +24,6 @@ cvae_checkpoints_modular/
 # OS
 .DS_Store
 Thumbs.db
+
+#imgs
+*.png
