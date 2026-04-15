@@ -22,10 +22,9 @@ with open(LABEL_INFO_PATH, "r") as f:
 
 NUM_CLASSES      = label_info["num_classes"]
 label_to_int_map = label_info["label_to_int"]
-print("Classi caricate:", list(label_to_int_map.keys()))
 
 # ---------------------------------------------------------------------------
-# 2. ARCHITETTURA ORIGINALE (Copiata esattamente dal tuo main_training.py)
+# 2. ARCHITETTURA (Copiata esattamente dal tuo main_training.py)
 # ---------------------------------------------------------------------------
 
 def build_encoder(latent_dim_param, num_classes_param, embedding_dim_param):
@@ -89,91 +88,89 @@ class CVAE(Model):
         z = self.sampling([z_m, z_v])
         return self.decoder([z, lbl])
 
-# --- INIZIALIZZAZIONE E CARICAMENTO ---
+# --- INIZIALIZZAZIONE ---
 enc = build_encoder(LATENT_DIM, NUM_CLASSES, EMBEDDING_DIM)
 dec = build_decoder(LATENT_DIM, NUM_CLASSES, EMBEDDING_DIM)
-cvae_model = CVAE(enc, dec)
-_ = cvae_model([np.zeros((1, 128, 128, 1)), np.zeros((1, 1))])
-cvae_model.load_weights(MODEL_WEIGHTS_PATH)
-print("Pesi caricati con successo!")
+full_cvae = CVAE(enc, dec)
+_ = full_cvae([np.zeros((1, 128, 128, 1)), np.zeros((1, 1))])
+full_cvae.load_weights(MODEL_WEIGHTS_PATH)
+print("Pesi caricati correttamente!")
 
 # ---------------------------------------------------------------------------
-# 3. LOGICA DI RENDERING
+# 3. LOGICA DI SCRITTURA
 # ---------------------------------------------------------------------------
 
-def genera_char_img(char, temp=0.6):
-    mapping = {
-        '?': 'INTERROGATIVO', '!': 'ESCLAMATIVO', '.': 'PUNTO', 
-        ',': 'VIRGOLA', "'": 'VIRGOLA' # Se non hai 'APOSTROFO', usa VIRGOLA
-    }
-    # Prova a cercare APOSTROFO se presente, altrimenti segui il mapping
-    c_key = char.upper()
-    if char == "'":
+def pulisci_tratto(raw_img_np):
+    img = Image.fromarray(raw_img_np.astype(np.uint8)).convert("L")
+    img = ImageEnhance.Contrast(img).enhance(3.0)
+    # ELIMINA QUADRATINI: Forza bianco se pixel > 190
+    img = img.point(lambda p: 255 if p > 190 else p)
+    return img
+
+def genera_char_img(c, temp=0.6):
+    mapping = {'?': 'INTERROGATIVO', '!': 'ESCLAMATIVO', '.': 'PUNTO', ',': 'VIRGOLA'}
+    c_key = c.upper()
+    if c == "'":
         c_key = 'APOSTROFO' if 'APOSTROFO' in label_to_int_map else 'VIRGOLA'
     else:
-        c_key = mapping.get(char, c_key)
+        c_key = mapping.get(c, c_key)
 
-    if c_key not in label_to_int_map:
-        return None
+    if c_key not in label_to_int_map: return None
     
     idx = label_to_int_map[c_key]
     z = tf.random.normal(shape=(1, LATENT_DIM)) * temp
-    gen = cvae_model.decoder.predict([z, np.array([[idx]])], verbose=0)[0, :, :, 0]
+    gen = full_cvae.decoder.predict([z, np.array([[idx]])], verbose=0)[0, :, :, 0]
     return (1.0 - gen) * 255
 
-def scrivi_testo_migliorato(testo, output="risultato_finale.png"):
-    # Gestione automatica accenti -> lettera + apostrofo
-    acc = {'à':"A'", 'è':"E'", 'é':"E'", 'ì':"I'", 'ò':"O'", 'ù':"U'", 'À':"A'", 'È':"E'", 'É':"E'", 'Ì':"I'", 'Ò':"O'", 'Ù':"U'"}
+def scrivi_testo_handwriting(testo, output="risultato_perfetto.png"):
+    # Normalizza accenti (à -> A')
+    acc = {'à':"A'", 'è':"E'", 'é':"E'", 'ì':"I'", 'ò':"O'", 'ù':"U'"}
     for k, v in acc.items(): testo = testo.replace(k, v)
     
     foglio = Image.new('L', (2400, 1800), 255)
-    x, y = 80, 120
-    riga_h = 220
-    baseline_y = 150 # Altezza ideale dove appoggiano le lettere
+    x, y = 80, 100
+    baseline_riga = 150 
 
     parole = testo.split(' ')
     for parola in parole:
-        imgs = []
-        w_parola = 0
+        immagini_parola = []
+        larghezza_parola = 0
+        
         for c in parola:
             raw = genera_char_img(c)
             if raw is not None:
-                img_c = Image.fromarray(raw.astype(np.uint8)).convert("L")
-                img_c = ImageEnhance.Contrast(img_c).enhance(2.5)
-                # PULIZIA DRASTICA QUADRATINI
-                img_c = img_c.point(lambda p: 255 if p > 195 else p)
-                
+                img_c = pulisci_tratto(raw)
                 inv = ImageOps.invert(img_c)
                 bbox = inv.getbbox()
                 if bbox:
                     crop = img_c.crop(bbox)
-                    # Rimpicciolisci segni punteggiatura
+                    # Rimpicciolisci i segni piccoli
                     if c in ".,'":
                         crop = crop.resize((int(crop.width*0.65), int(crop.height*0.65)), Image.LANCZOS)
                     
-                    rot = crop.rotate(random.uniform(-1.8, 1.8), resample=Image.BICUBIC, expand=True)
-                    imgs.append((rot, c))
-                    w_parola += rot.width + 5
+                    rot = crop.rotate(random.uniform(-1.5, 1.5), resample=Image.BICUBIC, expand=True)
+                    immagini_parola.append((rot, c))
+                    larghezza_parola += rot.width + 5
         
-        if x + w_parola > 2300:
-            x, y = 80, y + riga_h
+        if x + larghezza_parola > 2300: # Vai a capo
+            x, y = 80, y + 220
         
-        for img_l, char_orig in imgs:
-            # POSIZIONAMENTO VERTICALE DINAMICO
-            if char_orig in ".,":
-                pos_y = y + baseline_y - img_l.height # Attaccato alla base
-            elif char_orig == "'":
-                pos_y = y + 15 # In alto
-            else:
-                pos_y = y + (baseline_y - 120) # Lettere normali un po' più in alto della base
+        for img_l, char_orig in immagini_parola:
+            # POSIZIONAMENTO VERTICALE
+            if char_orig in ".,": # A terra
+                pos_y = y + baseline_riga - img_l.height 
+            elif char_orig == "'": # In alto
+                pos_y = y + 10 
+            else: # Standard
+                pos_y = y + (baseline_riga - 125) 
             
-            mask = ImageOps.invert(img_l).point(lambda p: 255 if p > 60 else 0)
+            mask = ImageOps.invert(img_l).point(lambda p: 255 if p > 50 else 0)
             foglio.paste(img_l, (x, pos_y + random.randint(-2, 2)), mask=mask)
             x += img_l.width + 5
         x += 80
 
     foglio.save(output)
-    print(f"Creato: {output}")
+    print(f"Salvato in: {output}")
 
 # --- ESECUZIONE ---
-scrivi_testo_migliorato("Ciao Davide! L'università è fantastica, specialmente quando i progetti funzionano.")
+scrivi_testo_handwriting("Ciao Davide! L'universita' e' fantastica, specialmente quando i progetti funzionano.")
